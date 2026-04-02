@@ -51,10 +51,14 @@ const expirePublications = async (authorId) => {
 
 router.post("/", authMiddleware, async (req, res) => {
   try {
-    const { type, model, color, storage, imei, distinctiveMarks, zone, exactLocation, dateOfEvent } = req.body;
+    const { type, model, color, storage, imei, distinctiveMarks, zone, exactLocation, dateOfEvent, photo } = req.body;
 
     if (!["Perdido", "Achado"].includes(type)) {
       return res.status(400).json({ message: "Tipo invalido." });
+    }
+
+    if (!photo) {
+      return res.status(400).json({ message: "É obrigatório anexar uma fotografia." });
     }
 
     await expirePublications(req.user.id);
@@ -80,6 +84,7 @@ router.post("/", authMiddleware, async (req, res) => {
       zone,
       exactLocation,
       dateOfEvent,
+      photo,
       author: req.user.id,
       status: "Ativo",
       pendingSince: null,

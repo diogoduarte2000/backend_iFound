@@ -17,7 +17,11 @@ app.get("/", (req, res) => {
 });
 
 app.get("/api/status", (req, res) => {
-  res.json({ message: "Backend do Ifound a funcionar!" });
+  if (mongoose.connection.readyState === 1) {
+    res.json({ message: "Backend e DB conectados com sucesso!" });
+  } else {
+    res.status(503).json({ message: "Servidor ativo mas Banco de Dados offline/indisponível." });
+  }
 });
 
 const authRoutes = require("./routes/auth");
@@ -44,16 +48,17 @@ const smtpConfigured = Boolean(
   process.env.SMTP_PASS
 );
 
-mongoose.connect(MONGODB_URI)
-  .then(() => {
-    console.log("MongoDB ligado com sucesso.");
-    if (!smtpConfigured) {
-      console.warn("SMTP nao configurado. O 2FA por email nao vai funcionar.");
-    }
-    app.listen(PORT, () => {
-      console.log(`Servidor a correr na porta ${PORT}.`);
+app.listen(PORT, () => {
+  console.log(`Servidor a correr na porta ${PORT}.`);
+  
+  mongoose.connect(MONGODB_URI)
+    .then(() => {
+      console.log("MongoDB ligado com sucesso.");
+      if (!smtpConfigured) {
+        console.warn("SMTP nao configurado. O 2FA por email nao vai funcionar.");
+      }
+    })
+    .catch((err) => {
+      console.error("Erro critico ao ligar ao MongoDB:", err.message);
     });
-  })
-  .catch((err) => {
-    console.error("Erro ao ligar ao MongoDB:", err);
-  });
+});
