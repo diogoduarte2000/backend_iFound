@@ -157,26 +157,26 @@ router.post("/login", async (req, res) => {
       return res.status(400).json({ message: "Credenciais invalidas." });
     }
 
-    // If 2FA is not enabled, allow direct login (or suggest enabling it)
-    if (!user.twoFactorEnabled) {
-      const token = jwt.sign(
-        { id: user._id, email: user.email },
-        process.env.JWT_SECRET || "default_secret_key",
-        { expiresIn: "1d" }
-      );
-      return res.json({
-        token,
-        message: "Login efetuado com sucesso!",
-        twoFactorEnabled: false,
-      });
+    // Generate 6-digit code and save to DB (expires in 60 seconds)
+    const code = generate2FACode();
+    user.twoFactorCode = code;
+    user.twoFactorCodeExpires = new Date(Date.now() + 60 * 1000); // 60 seconds
+    await user.save();
+
+    // Send email with code
+    try {
+      await send2FAEmail(user.email, code);
+    } catch (emailError) {
+      console.error("Email envio falhou:", emailError);
+      return res.status(500).json({ message: "Erro ao enviar codigo por email. Tenta novamente." });
     }
 
-    // If 2FA is enabled, return flag requiring TOTP verification
+    // Return flag requiring 2FA verification
     res.json({
-      message: "Credenciais validas. Insere o codigo do Authenticator.",
+      message: "Credenciais validas. Enviamos um codigo para o teu email.",
       email: user.email,
-      twoFactorEnabled: true,
-      requiresTOTP: true,
+      requiresEmailCode: true,
+      twoFactorEnabled: user.twoFactorEnabled, // Flag indicating if TOTP is also available
     });
   } catch (error) {
     console.error(error);
@@ -305,6 +305,44 @@ router.post("/reset-password", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Erro ao atualizar a palavra-passe." });
+  }
+});
+
+// POST /resend-2fa - Resend 2FA email code (60s expiration)
+router.post("/resend-2fa", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ message: "Utilizador nao encontrado." });
+    }
+
+    // Check if a valid code already exists
+    if (user.twoFactorCode && user.twoFactorCodeExpires > new Date()) {
+      return res.status(400).json({ message: "Ja existe um codigo ativo. Aguarda a expiracao (60 segundos)." });
+    }
+
+    // Generate new code
+    const code = generate2FACode();
+    user.twoFactorCode = code;
+    user.twoFactorCodeExpires = new Date(Date.now() + 60 * 1000); // 60 seconds
+    await user.save();
+
+    // Send email
+    try {
+      await send2FAEmail(user.email, code);
+    } catch (emailError) {
+      console.error("Email envio falhou:", emailError);
+      return res.status(500).json({ message: "Erro ao enviar codigo por email." });
+    }
+
+    res.json({
+      message: "Novo codigo enviado para o teu email."
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Erro ao reenviar codigo." });
   }
 });
 
@@ -448,7 +486,7 @@ router.get("/2fa/backup-codes/regenerate", authMiddleware, async (req, res) => {
   }
 });
 
-// POST /verify-2fa - Updated to support TOTP + Backup codes + Trusted devices
+// POST /verify-2fa - Verify email code, TOTP, or backup codes
 router.post("/verify-2fa", async (req, res) => {
   try {
     const { email, code, deviceId, trustDevice } = req.body;
@@ -458,17 +496,11 @@ router.post("/verify-2fa", async (req, res) => {
       return res.status(400).json({ message: "Utilizador nao encontrado." });
     }
 
-    // If 2FA not enabled, skip verification
-    if (!user.twoFactorEnabled) {
-      const token = jwt.sign(
-        { id: user._id, email: user.email },
-        process.env.JWT_SECRET || "default_secret_key",
-        { expiresIn: "1d" }
-      );
-      return res.json({ token, message: "Login efetuado com sucesso!" });
+    if (!code || code.length < 6) {
+      return res.status(400).json({ message: "Codigo invalido." });
     }
 
-    // Check if device is trusted
+    // Check if device is trusted (skip 2FA for trusted devices)
     if (deviceId) {
       const trustedDevice = user.trustedDevices.find((d) => d.deviceId === deviceId);
       if (trustedDevice) {
@@ -484,20 +516,25 @@ router.post("/verify-2fa", async (req, res) => {
       }
     }
 
-    // Verify TOTP code or backup code
-    if (!code || code.length < 6) {
-      return res.status(400).json({ message: "Codigo invalido." });
-    }
-
     let isValidCode = false;
 
-    // Try TOTP verification first
-    if (code.length === 6) {
+    // Priority 1: Verify email code (6 digits, expires in 60 seconds)
+    if (code.length === 6 && user.twoFactorCode) {
+      if (user.twoFactorCode === code && user.twoFactorCodeExpires > new Date()) {
+        isValidCode = true;
+        // Clear the code after successful verification
+        user.twoFactorCode = null;
+        user.twoFactorCodeExpires = null;
+      }
+    }
+
+    // Priority 2: Verify TOTP code (if 2FA enabled and email code didn't work)
+    if (!isValidCode && code.length === 6 && user.twoFactorEnabled && user.twoFactorSecret) {
       isValidCode = verifyTOTPCode(user.twoFactorSecret, code);
     }
 
-    // Try backup code if TOTP fails
-    if (!isValidCode && code.length === 8) {
+    // Priority 3: Verify backup code (if 2FA enabled)
+    if (!isValidCode && code.length === 8 && user.twoFactorEnabled) {
       const hashedCode = hashBackupCode(code);
       const backupCodeIndex = user.twoFactorBackupCodes.indexOf(hashedCode);
 
